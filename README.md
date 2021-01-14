@@ -1,4 +1,4 @@
-# Prediction of Lending Club Loan Status
+# Classification of Lending Club Loan Status
 
 In this project, Lending Club accepted loan data is studied. Loan status is response variable and I worked on both 84 remaining variable and selected 10 remaining variable.
 
