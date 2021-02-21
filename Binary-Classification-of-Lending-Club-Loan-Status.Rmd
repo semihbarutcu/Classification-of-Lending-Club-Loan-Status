@@ -1,0 +1,545 @@
+---
+title: "Binary Loan Status Classification"
+author: "Semih Barutcu"
+date: "2/10/2021"
+output: pdf_document
+---
+
+
+
+```{r warning=FALSE, message=FALSE}
+library(pacman)
+p_load(dplyr, tidyverse, lubridate, Amelia, vtable, tictoc, rpart, rpart.plot, C50, ROCR, 
+       caret, randomForest, tictoc, ranger, class, gmodels, naivebayes, autoEDA, summarytools)
+```
+
+In this project, Lending Club accepted loan data was studied. Loan status was response variable and I worked on both 84 remaining variable and selected 14 remaining variable. Machine Learning algorithms implementations and results can be seen below step by step.
+
+
+## Step 1 – Reading the data
+
+```{r warning=FALSE, message=F}
+tic()
+LendingClub  <- read_csv("accepted_2007_to_2018Q4.csv") %>% mutate_if(is.character, as.factor)
+toc()
+```
+
+
+
+I eliminated some variables because they are identifier variables train data which possibly overfit. Also, some of variables are not selected because of impractical to use and including excessive NA values. 
+
+```{r}
+#  year from issue_d and make it integer
+LendingClub$year <- str_sub(LendingClub$issue_d, start=-4) %>% as.integer(LendingClub$year)
+
+LendingClub_2012to2014 <- LendingClub %>% 
+  filter(between(year,2012,2014)) %>% 
+  select(-id, -member_id, -emp_title, -issue_d, -url, -desc, -zip_code, -title, 
+         -earliest_cr_line, -last_pymnt_d, -last_credit_pull_d, -total_pymnt, -total_pymnt_inv, 
+         -total_rec_int) 
+
+# Eliminating columns with more than 20% of NAs  
+LendingClub_2012to2014 <- LendingClub_2012to2014[, colMeans(is.na(LendingClub_2012to2014)) < 0.1]
+
+
+LendingClub_2012to2014v2 <- LendingClub %>% 
+  filter(between(year,2012,2014)) %>% 
+  select(loan_status, funded_amnt, annual_inc, term, installment, int_rate, grade, dti,
+         verification_status, fico_range_low, total_acc, tot_cur_bal, acc_open_past_24mths, num_bc_sats) 
+
+LendingClub_2012to2014v2 <- LendingClub %>% 
+  filter(between(year,2012,2014)) %>% 
+  select(loan_status, funded_amnt, annual_inc, term, installment, int_rate, grade, dti,
+         verification_status, fico_range_low, total_acc, tot_cur_bal, acc_open_past_24mths, num_bc_sats,
+         open_acc, revol_bal, revol_util, last_fico_range_low, total_rev_hi_lim,
+         bc_open_to_buy, mo_sin_old_rev_tl_op, mort_acc, num_bc_sats, num_bc_tl, num_sats, 
+         tot_hi_cred_lim, total_bal_ex_mort) 
+```
+
+
+
+## Step 2 – Exploring and preparing the data
+
+From loan_status table, we can see that 3 results were observed at most. I filtered the data just for these options to get more accurate results.
+
+On the first graph, loan status were depicted according to count of funded amounts and faceted by term. 36 months loan users had a right skewed distribution while 60 months users had an uneven distribution.
+
+On the first graph, loan status were depicted according to count of interest rate and faceted by term. 36 months loan users had a right skewed distribution again while 60 months users had normal distribution.
+
+We can see that 60 months term loan users had higher rate of charged off from table and graphs.
+
+```{r}
+LendingClub_2012to2014 <- LendingClub_2012to2014 %>% 
+  filter(loan_status == "Charged Off"  | loan_status == "Fully Paid") %>% na.omit()
+
+LendingClub_2012to2014v2 <- LendingClub_2012to2014v2 %>% 
+  filter(loan_status == "Charged Off"  | loan_status == "Fully Paid") %>% na.omit()
+
+LendingClub_2012to2014v2$loan_status <- factor(LendingClub_2012to2014v2$loan_status)
+levels(LendingClub_2012to2014v2$loan_status)
+```
+
+
+
+```{r}
+addmargins(table(LendingClub_2012to2014v2$loan_status, LendingClub_2012to2014v2$term))
+addmargins(prop.table(table(LendingClub_2012to2014v2$loan_status, LendingClub_2012to2014v2$term)))
+
+options(repr.plot.width = 1, repr.plot.height = 0.5)
+
+LendingClub_2012to2014v2 %>% 
+  ggplot(aes(funded_amnt, fill = loan_status)) +
+  geom_histogram(bins = 10) +
+  scale_fill_brewer(palette = "Dark2", direction = -1) +
+  facet_wrap(~term) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+LendingClub_2012to2014v2 %>% 
+  ggplot(aes(int_rate, fill = loan_status)) +
+  geom_histogram(bins = 10) +
+  scale_fill_brewer(palette = "Dark2", direction = -1) +
+  facet_wrap(~term) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+
+## Step 3 – Training models
+
+### Splitting 
+
+The data is imbalanced. Original proportions are 82.7% of fully-paid and 17.3% of charged-off. Good credits observations are under-sampled accordinglt total number of bad credits and a balanced dataset is obtained which has 50% of the each categories. This way, the resulting balanced dataset would provide a better learning process for any model.  
+
+The balanced data has 130994 observations and 25 independent variables with the response variable loan_status. I used 75 to 25 percent split for training and test datasets. All of these models are tuned over a validation set sampled within training set without replacement.
+
+
+```{r}
+charged_off <- LendingClub_2012to2014v2 %>% filter(loan_status == "Charged Off")
+
+nrow(charged_off)
+```
+
+
+```{r}
+set.seed(123)
+fully_paid <- LendingClub_2012to2014v2 %>% filter(loan_status == "Fully Paid")
+
+fully_paid_sample <- sample_n(fully_paid, nrow(charged_off))
+```
+
+
+```{r}
+Lending_balanced <- bind_rows(charged_off, fully_paid_sample)
+```
+
+
+
+```{r}
+set.seed(123)
+
+idx <- sample(nrow(Lending_balanced), round(0.75*nrow(Lending_balanced)))
+
+train_full <- Lending_balanced[idx,]
+test <- Lending_balanced[-idx,]
+
+idx2 <- sample(nrow(train_full), round(0.75*nrow(train_full)))
+
+train <- train_full[idx2,]
+validation <- train_full[-idx2,]
+
+
+train_sample <- sample_n(train, 10000)
+test_sample <- sample_n(test, 2500)
+```
+
+
+
+
+### Null Model
+
+
+
+```{r}
+train %>% 
+  group_by(loan_status) %>%
+  summarise(n = n()) %>%
+  mutate(freq = n/sum(n))
+
+validation %>% 
+  group_by(loan_status) %>%
+  summarise(n = n()) %>%
+  mutate(freq = n/sum(n))
+```
+
+
+### Logistic Regression
+
+
+
+```{r}
+log_reg <- glm(loan_status~., train, family = binomial)
+
+summary(log_reg)
+```
+
+
+```{r}
+pred <- predict(log_reg, newdata = train, type = "response")
+
+log_reg_pred <- ifelse(pred > 0.5, "Fully Paid", "Charged Off")
+
+
+```
+
+
+```{r}
+CrossTable(x = log_reg_pred, y = train$loan_status, prop.c = F, prop.r = F,
+           prop.chisq = FALSE)
+
+mean(train$loan_status == log_reg_pred)
+```
+
+```{r}
+pred <- predict(log_reg, newdata = test, type = "response")
+
+log_reg_pred <- ifelse(pred > 0.5, "Fully Paid", "Charged Off")
+
+
+CrossTable(x = test$loan_status, y = log_reg_pred, prop.c = F, prop.r = F,
+           prop.chisq = FALSE)
+
+mean(test$loan_status == log_reg_pred)
+```
+
+
+
+
+### kNN
+
+kNN method was implemented after required normalization. I chose k as 4 firstly. The accuracies were 85.88% and 77.68% for train and test data respectively. Detailed proportions can be seen on CrossTable. Over-fitting is on the acceptable range for kNN method.
+
+
+
+```{r}
+# Normalization function
+normalize <- function(x) {
+  return ((x - min(x)) / (max(x) - min(x)))
+}
+
+# Prepare data
+train_knn <- train %>% mutate_if(is.factor, as.numeric)
+test_knn <- test %>% mutate_if(is.factor, as.numeric)
+
+# Normalization
+train_knn_n  <- as.data.frame(lapply(train_knn[2:26], normalize))
+test_knn_n  <- as.data.frame(lapply(test_knn[2:26], normalize))
+
+# Prediction for train data
+pred_knntrain <- knn(train_knn_n, train_knn_n, cl= train_knn$loan_status, k=20)
+
+# Evaluating model performance
+CrossTable(x = train_knn$loan_status, y = pred_knntrain,
+           prop.chisq = FALSE)
+
+mean(train_knn$loan_status == pred_knntrain)
+
+# Prediction for test data
+pred_knntest <- knn(train_knn_n, test_knn_n, cl= train_knn$loan_status, k=20)
+
+# Evaluating model performance
+CrossTable(x = test_knn$loan_status, y = pred_knntest,
+           prop.chisq = FALSE)
+
+mean(test_knn$loan_status == pred_knntest)
+```
+
+
+
+
+### Boosted C5.0
+
+One of the best way to learn loans is classification trees. Default decision tree via C5.0 can be seen below.
+
+
+```{r}
+train_c50 <- train %>% select(-term, -grade)
+validation_c50 <- validation %>% select(-term, -grade)
+test_c50 <- test %>% select(-term, -grade)
+
+train_sample_c50 <- train_sample %>% select(-term, -grade)
+test_sample_c50 <- test_sample %>% select(-term, -grade)
+```
+
+
+```{r}
+modelc50 <- C5.0(loan_status~., train)
+
+modelc50
+summary(modelc50)
+```
+
+```{r}
+fittedc50train <- predict(modelc50, newdata = train[,-1])
+
+print(paste('Accuracy for train:', mean(fittedc50train == train$loan_status)))
+
+# test
+
+fittedc50test <- predict(modelc50, newdata = validation[,-1])
+
+print(paste('Accuracy for test:', mean(fittedc50test == validation$loan_status)))
+```
+
+```{r}
+fittedc50test <- predict(modelc50, newdata = test[,-1])
+
+print(paste('Accuracy for test:', mean(fittedc50test == test$loan_status)))
+
+CrossTable(x = test$loan_status, y = fittedc50test,
+           prop.chisq = FALSE)
+
+mean(test$loan_status == fittedc50test)
+```
+
+
+C5.0 could be developed by boosting. I excluded summary of the new model because of ease of readability.
+
+```{r}
+## Boosting the accuracy of decision trees
+# boosted decision tree with 10 trials
+
+modelc50boosted <- C5.0(loan_status~., train, trials = 30)
+
+#modelc50boosted
+#(modelc50boosted)
+```
+
+
+```{r}
+fittedc50trainboosted <- predict(modelc50boosted, newdata = train[,-1])
+
+print(paste('Accuracy for boosted train data:', mean(fittedc50trainboosted == train$loan_status)))
+
+fittedc50validationboosted <- predict(modelc50boosted, newdata = validation[,-1])
+
+print(paste('Accuracy for boosted test data:', mean(fittedc50validationboosted == validation$loan_status)))
+
+
+# test
+
+fittedc50testboosted <- predict(modelc50boosted, newdata = test[,-1])
+
+print(paste('Accuracy for boosted test data:', mean(fittedc50testboosted == test$loan_status)))
+```
+
+```{r}
+CrossTable(x = test$loan_status, y = fittedc50testboosted,
+           prop.chisq = FALSE)
+
+mean(test$loan_status == fittedc50testboosted)
+```
+
+
+
+### Random Forest via ranger
+
+Accuracy is perfect for the train dataset. Accuracy is 84.64% for test dataset again by ranger package. 
+
+```{r}
+tic()
+rfranger <- ranger(loan_status ~ ., data = train, num.threads = 12, num.trees = 20, max.depth = 10)
+
+rfranger
+
+rfranger$confusion.matrix
+
+summary(rfranger)
+
+rf_predrangertrain <- predict(rfranger, train)
+
+confusionMatrix(data=rf_predrangertrain$predictions, train$loan_status)
+
+rf_predrangerval <- predict(rfranger, validation)
+
+confusionMatrix(data=rf_predrangerval$predictions, validation$loan_status)
+toc()
+```
+
+```{r}
+rf_predrangertest <- predict(rfranger, test)
+
+confusionMatrix(data=rf_predrangertest$predictions, test$loan_status)
+```
+
+```{r}
+CrossTable(x = test$loan_status, y = rf_predrangertest$predictions,
+           prop.chisq = FALSE)
+
+mean(test$loan_status == rf_predrangertest$predictions)
+```
+
+## Model Evaluation: Lending Club 2015 Data
+
+
+Once you have decided on the best model, refit it using all of the 2012-2014 data and then use your model to classify all of the 2015 data. Check the accuracy of your predictions. 
+
+2015 Lending Club data includes higher proportions of charged-off category due to 60 months credits mostly have not resulted for fully-paid credits.
+
+
+```{r}
+LendingClub_2015 <- LendingClub %>% 
+  filter(year == 2015) %>% 
+  select(loan_status, funded_amnt, annual_inc, term, installment, int_rate, grade, dti,
+         verification_status, fico_range_low, total_acc, tot_cur_bal, acc_open_past_24mths, num_bc_sats,
+         open_acc, revol_bal, revol_util, last_fico_range_low, total_rev_hi_lim,
+         bc_open_to_buy, mo_sin_old_rev_tl_op, mort_acc, num_bc_sats, num_bc_tl, num_sats, 
+         tot_hi_cred_lim, total_bal_ex_mort) 
+
+LendingClub_2015 <- LendingClub_2015 %>% 
+  filter(loan_status == "Charged Off"  | loan_status == "Fully Paid") %>% na.omit()
+
+LendingClub_2015$loan_status <- factor(LendingClub_2015$loan_status)
+levels(LendingClub_2015$loan_status)
+```
+
+```{r}
+addmargins(table(LendingClub_2015$loan_status, LendingClub_2015$term))
+addmargins(prop.table(table(LendingClub_2015$loan_status, LendingClub_2015$term)))
+
+options(repr.plot.width = 1, repr.plot.height = 0.5)
+
+LendingClub_2015 %>% 
+  ggplot(aes(funded_amnt, fill = loan_status)) +
+  geom_histogram(bins = 10) +
+  scale_fill_brewer(palette = "Dark2", direction = -1) +
+  facet_wrap(~term) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+LendingClub_2015 %>% 
+  ggplot(aes(int_rate, fill = loan_status)) +
+  geom_histogram(bins = 10) +
+  scale_fill_brewer(palette = "Dark2", direction = -1) +
+  facet_wrap(~term) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+```{r}
+dim(LendingClub_2015)
+
+LendingClub_2015 %>% 
+  group_by(loan_status) %>%
+  summarise(n = n()) %>%
+  mutate(freq = n/sum(n))
+```
+
+
+
+```{r}
+pred <- predict(log_reg, newdata = LendingClub_2015, type = "response")
+
+log_reg_pred <- ifelse(pred > 0.5, "Fully Paid", "Charged Off")
+
+
+CrossTable(x = LendingClub_2015$loan_status, y = log_reg_pred,
+           prop.chisq = FALSE)
+
+mean(LendingClub_2015$loan_status == log_reg_pred)
+```
+
+```{r}
+LendingClub_2015_knn <- LendingClub_2015 %>% mutate_if(is.factor, as.numeric)
+
+# Normalization
+LendingClub_2015_knn_n  <- as.data.frame(lapply(LendingClub_2015_knn[2:26], normalize))
+
+pred_knn <- knn(train_knn_n, LendingClub_2015_knn_n, cl= train_knn$loan_status, k=20)
+
+# Evaluating model performance
+CrossTable(x = LendingClub_2015_knn$loan_status, y = pred_knn,
+           prop.chisq = FALSE)
+
+mean(LendingClub_2015_knn$loan_status == pred_knn)
+```
+
+
+
+```{r}
+fittedc50test <- predict(modelc50, newdata = LendingClub_2015[,-1])
+
+print(paste('Accuracy for test:', mean(fittedc50test == LendingClub_2015$loan_status)))
+
+CrossTable(x = LendingClub_2015$loan_status, y = fittedc50test,
+           prop.chisq = FALSE)
+
+mean(LendingClub_2015$loan_status == fittedc50test)
+```
+
+
+
+
+
+```{r}
+rf_predrangertest <- predict(rfranger, LendingClub_2015)
+
+confusionMatrix(data=rf_predrangertest$predictions, LendingClub_2015$loan_status)
+```
+
+
+
+## Performance Measures
+
+- Sensitivity  =  True Positives / (True Positives + False Negatives)
+
+
+- Specificity  =  True Negatives / (True Negatives + False Positives)
+
+
+- Accuracy  =  (True Positives + True Negatives) / (True Positives + True Negatives + False Positives + False Negatives)
+
+
+
+## Testing All Models on 2015 Data 
+
+Performances of all models for an imbalanced data can be seen below. Logistic Regression has better accuracy than others for 2015. However, k-nearest neighbors has the highest specificity and Random forest has the highest sensitivity.
+
+   Models           | Sensitivity | Specificity | Accuracy |
+--------------------|-------------|-------------|----------|
+ Logistic Regression|    0.906    |    0.882    |   0.887  |          
+--------------------|-------------|-------------|----------|
+ k-Nearest Neighbors|    0.711    |    0.920    |   0.811  |          
+--------------------|-------------|-------------|----------|
+ C5.0               |    0.939    |    0.841    |   0.860  |          
+--------------------|-------------|-------------|----------|
+ Random Forest      |    0.944    |    0.835    |   0.855  |          
+--------------------|-------------|-------------|----------|
+
+ 
+
+## Conclusion
+
+Trade-off of this study is between the cost of default and paid credits. 
+
+My last decision is to use Random forest, the method with the highest sensitivity. Detecting bad credits correctly 94.4% instead 90.6% is more valuable than getting higher total accuracy by 2.2%. 
+
+If the loss and profit values are known in advance, then an integer programming approach could be implemented to make the final model selection easier. 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
